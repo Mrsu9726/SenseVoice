@@ -10,6 +10,7 @@ from enum import Enum
 import torchaudio
 from model import SenseVoiceSmall
 from funasr.utils.postprocess_utils import rich_transcription_postprocess
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from io import BytesIO
 
 
@@ -27,6 +28,26 @@ m, kwargs = SenseVoiceSmall.from_pretrained(model=model_dir, device=os.getenv("S
 m.eval()
 
 regex = r"<\|.*\|>"
+
+# optional Qwen model for semantic correction
+if os.getenv("USE_QWEN", "false").lower() == "true":
+    qwen_name = os.getenv("QWEN_MODEL_NAME", "Qwen/Qwen2-7B-Chat")
+    qwen_model = AutoModelForCausalLM.from_pretrained(qwen_name, device_map="auto")
+    qwen_tokenizer = AutoTokenizer.from_pretrained(qwen_name)
+else:
+    qwen_model = None
+    qwen_tokenizer = None
+
+def qwen_correct(text: str) -> str:
+    if qwen_model is None:
+        return text
+    prompt = f"请根据上下文还原成合理的完整句子:\n{text}\n还原后："
+    inputs = qwen_tokenizer(prompt, return_tensors="pt").to(qwen_model.device)
+    outputs = qwen_model.generate(**inputs, max_new_tokens=128)
+    result = qwen_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    if "还原后：" in result:
+        result = result.split("还原后：", 1)[-1].strip()
+    return result
 
 app = FastAPI()
 
@@ -77,4 +98,5 @@ async def turn_audio_to_text(files: Annotated[List[bytes], File(description="wav
         it["raw_text"] = it["text"]
         it["clean_text"] = re.sub(regex, "", it["text"], 0, re.MULTILINE)
         it["text"] = rich_transcription_postprocess(it["text"])
+        it["corrected_text"] = qwen_correct(it["text"])
     return {"result": res[0]}
